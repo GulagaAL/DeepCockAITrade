@@ -1,4 +1,3 @@
-# DEEPCKAITRADE/modules/api_client.py
 import os
 import json
 import time
@@ -11,9 +10,18 @@ class DeepSeekClient:
         self.config = Config()
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.config.DEEPSEEK_API_KEY}"  # ✅ Проверьте, что ключ подгружается
+            "Authorization": f"Bearer {self.config.DEEPSEEK_API_KEY}"
         }
         self.timeout = int(self.config.DEEPSEEK_TIMEOUT)
+        
+        # ✅ Хранение истории сообщений (контекста)
+        self.conversation_history = [
+            {
+                "role": "system",
+                "content": self._get_system_prompt()
+            }
+        ]
+        print(f"[API] Инициализирован клиент. URL: {self.config.DEEPSEEK_API_URL}")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -21,46 +29,64 @@ class DeepSeekClient:
         retry=retry_if_exception_type((requests.exceptions.Timeout, requests.exceptions.ConnectionError))
     )
     def get_prediction(self, market_data_json):
-        """Отправляет данные в DeepSeek API и возвращает распарсенный прогноз"""
+        """Отправляет данные в DeepSeek API и возвращает распарсенный прогноз."""
         try:
             # ✅ Конвертируем все булевы значения в строковые перед отправкой
             safe_data = self._serialize_for_api(market_data_json)
             
-            # Формируем промпт в точном соответствии с требованиями
+            # ✅ Добавляем новое сообщение пользователя в историю
+            user_message = {
+                "role": "user",
+                "content": json.dumps(safe_data, ensure_ascii=False)
+            }
+            self.conversation_history.append(user_message)
+            
+            # Формируем payload с историей
             payload = {
                 "model": self.config.DEEPSEEK_MODEL,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": self._get_system_prompt()
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(safe_data, ensure_ascii=False)  # ✅ Используем safe_data
-                    }
-                ],
-                "response_format": {"type": "json_object"},  # ✅ Тип должен быть именно так
-                "temperature": 0.1,  # ✅ Допустимое значение
+                "messages": self.conversation_history,
+                "response_format": {"type": "json_object"},
+                "temperature": 0.1,
                 "max_tokens": 500
             }
             
+            # ✅ Добавим отладочные принты
+            print(f"[API SEND] Отправляем {len(self.conversation_history)} сообщений в историю")
+            print(f"[API SEND] Текущая цена: {safe_data.get('market_data', {}).get('price_current', 'N/A')}")
+            print(f"[API SEND] Текущий индикатор RSI: {safe_data.get('market_data', {}).get('indicators', {}).get('rsi', {}).get('current', 'N/A')}")
+            
             start_time = time.time()
             response = requests.post(
-                self.config.DEEPSEEK_API_URL,
+                self.config.DEEPSEEK_API_URL,  # Убедитесь, что это правильный URL!
                 headers=self.headers,
-                json=payload,  # ✅ Отправляем как JSON
+                json=payload,
                 timeout=self.timeout
             )
             latency = time.time() - start_time
             
             print(f"[API] Запрос выполнен за {latency:.2f} сек. Статус: {response.status_code}")
             
-            response.raise_for_status()  # ✅ Вызовет исключение для 4xx/5xx
+            response.raise_for_status()
             response_data = response.json()
             
-            # Извлекаем JSON из ответа модели
+            # ✅ Покажем, что вернул API
+            print(f"[API RECV] Получено {len(response_data.get('choices', []))} вариантов ответа")
+            
+            # Извлекаем ответ ассистента
             prediction_json = self._extract_prediction(response_data)
+            print(f"[API RECV] Прогноз: {prediction_json.get('action', 'N/A')} с уверенностью {prediction_json.get('confidence', 'N/A')}%")
+            
             self._validate_prediction(prediction_json)
+            
+            # ✅ Добавляем ответ ассистента в историю для сохранения контекста
+            assistant_message = {
+                "role": "assistant",
+                "content": json.dumps(prediction_json, ensure_ascii=False)
+            }
+            self.conversation_history.append(assistant_message)
+            
+            # ✅ Покажем текущую длину истории
+            print(f"[API] История пополнена. Всего сообщений: {len(self.conversation_history)}")
             
             return prediction_json
             
@@ -81,10 +107,20 @@ class DeepSeekClient:
             print(f"[API ERROR] Неожиданная ошибка: {str(e)}")
             raise
     
+    def reset_conversation(self):
+        """Сбрасывает историю и возвращает к начальному системному промпту"""
+        self.conversation_history = [
+            {
+                "role": "system",
+                "content": self._get_system_prompt()
+            }
+        ]
+        print("[API] История сброшена. Следующий запрос будет с чистого листа.")
+    
     def _serialize_for_api(self, obj):
         """Конвертирует объекты в JSON-совместимый формат, особенно булевы значения"""
         if isinstance(obj, (bool,)):
-            return str(obj).lower()  # True -> "true", False -> "false"
+            return str(obj).lower()
         elif isinstance(obj, (dict,)):
             return {k: self._serialize_for_api(v) for k, v in obj.items()}
         elif isinstance(obj, (list,)):
@@ -101,7 +137,6 @@ class DeepSeekClient:
         return self._default_system_prompt()
     
     def _default_system_prompt(self):
-        # ✅ Убедитесь, что это ваш актуальный промпт
         return """
         # РОЛЬ И ЦЕЛЬ
         Ты — ядро высокочастотной торговой системы для M5-скальпинга. Твоя задача — генерировать сигналы (BUY/SELL/HOLD) с математически обоснованной степенью уверенности (confidence score). Основной принцип: «Лучше пропустить сделку, чем принять рискованное решение». Все расчёты должны включать:  
