@@ -1,7 +1,8 @@
 import os
 import json
 from datetime import datetime
-from config import Config
+from DEEPCKAITRADE.utils.logger import setup_logger, logger
+from DEEPCKAITRADE.config import Config
 
 class PredictionHandler:
     def __init__(self):

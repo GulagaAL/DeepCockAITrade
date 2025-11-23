@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 import os
-from config import Config
+from DEEPCKAITRADE.config import Config
 
 class PortfolioSimulator:
     def __init__(self, initial_balance):
